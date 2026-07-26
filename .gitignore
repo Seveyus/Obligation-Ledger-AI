@@ -1,0 +1,72 @@
+# --- Runtime data (never commit customer documents) ---
+runtime-data/
+*.sqlite3
+*.sqlite
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# --- Vector indexes / caches built at runtime ---
+*.npy
+*.npz
+*.faiss
+*.index
+indexes/
+.cache/
+
+# --- Real contracts: only synthetic fixtures may be committed ---
+*.pdf
+*.docx
+*.doc
+data/**/*.pdf
+data/incoming/
+!data/samples/*.txt
+!data/samples/*.md
+
+# --- Model weights ---
+models/
+*.safetensors
+*.gguf
+*.bin
+*.onnx
+*.pt
+*.pth
+
+# --- Secrets ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- Video / media (Sai's deliverable, not this repo) ---
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+env/
+.python-version
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+uv.lock
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
