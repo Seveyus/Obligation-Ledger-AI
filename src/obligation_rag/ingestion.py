@@ -66,7 +66,7 @@ def ingest_bytes(
     stored_path.write_bytes(payload)
 
     try:
-        parsed = parse_document(stored_path)
+        parsed = parse_document(stored_path, strip_furniture=settings.strip_page_furniture)
     except DocumentParseError:
         stored_path.unlink(missing_ok=True)
         raise

@@ -71,37 +71,86 @@ def clean_page_text(raw: str) -> str:
     return text.strip()
 
 
-def parse_pdf(path: str | Path) -> ParsedDocument:
+#: How much of a page's head/tail is considered running furniture.
+_FURNITURE_ZONE_LINES = 3
+#: Share of pages a line must appear on before it counts as furniture.
+_FURNITURE_PAGE_RATIO = 0.6
+_FURNITURE_MAX_LINE_CHARS = 120
+
+
+def strip_page_furniture(pages: list[str]) -> list[str]:
+    """Remove running headers and footers repeated across the document.
+
+    Filled contract templates repeat a header on every page ("INITIAL ____ DATE
+    ____ / Commercial Lease Agreement (Rev. 1343D17)"). It lands at the top of
+    every chunk, wastes model context and turns up inside quotes.
+
+    Only identical lines, only in the head/tail zone of a page, and only when
+    they appear on most pages — a clause is never removed, because a clause
+    does not repeat verbatim across two thirds of a contract.
+    """
+    if len(pages) < 3:
+        return pages
+
+    counts: dict[str, int] = {}
+    for page in pages:
+        lines = page.splitlines()
+        zone = lines[:_FURNITURE_ZONE_LINES] + lines[-_FURNITURE_ZONE_LINES:]
+        for candidate in {line.strip() for line in zone}:
+            if candidate and len(candidate) <= _FURNITURE_MAX_LINE_CHARS:
+                counts[candidate] = counts.get(candidate, 0) + 1
+
+    threshold = max(3, int(len(pages) * _FURNITURE_PAGE_RATIO))
+    furniture = {line for line, count in counts.items() if count >= threshold}
+    if not furniture:
+        return pages
+
+    cleaned: list[str] = []
+    for page in pages:
+        lines = page.splitlines()
+        head_end = min(_FURNITURE_ZONE_LINES, len(lines))
+        tail_start = max(0, len(lines) - _FURNITURE_ZONE_LINES)
+        kept = [
+            line
+            for position, line in enumerate(lines)
+            if not ((position < head_end or position >= tail_start) and line.strip() in furniture)
+        ]
+        cleaned.append("\n".join(kept).strip())
+    return cleaned
+
+
+def _build(path: Path, blocks: list[str], *, strip_furniture: bool) -> ParsedDocument:
+    texts = [clean_page_text(block) for block in blocks]
+    if strip_furniture:
+        texts = strip_page_furniture(texts)
+    pages = [ParsedPage(page=index, text=text) for index, text in enumerate(texts, start=1)]
+    _reject_empty(path, pages)
+    return ParsedDocument(filename=path.name, pages=pages)
+
+
+def parse_pdf(path: str | Path, *, strip_furniture: bool = True) -> ParsedDocument:
     """Extract text page by page from a PDF."""
     path = Path(path)
-    pages: list[ParsedPage] = []
     with fitz.open(path) as document:
-        for index, page in enumerate(document, start=1):
-            pages.append(ParsedPage(page=index, text=clean_page_text(page.get_text("text"))))
-    _reject_empty(path, pages)
-    return ParsedDocument(filename=path.name, pages=pages)
+        blocks = [page.get_text("text") for page in document]
+    return _build(path, blocks, strip_furniture=strip_furniture)
 
 
-def parse_text_file(path: str | Path) -> ParsedDocument:
+def parse_text_file(path: str | Path, *, strip_furniture: bool = True) -> ParsedDocument:
     """Parse a plain-text fixture, splitting pages on form feeds."""
     path = Path(path)
-    raw = path.read_text(encoding="utf-8")
-    pages = [
-        ParsedPage(page=index, text=clean_page_text(block))
-        for index, block in enumerate(raw.split(PAGE_SEPARATOR), start=1)
-    ]
-    _reject_empty(path, pages)
-    return ParsedDocument(filename=path.name, pages=pages)
+    blocks = path.read_text(encoding="utf-8").split(PAGE_SEPARATOR)
+    return _build(path, blocks, strip_furniture=strip_furniture)
 
 
-def parse_document(path: str | Path) -> ParsedDocument:
+def parse_document(path: str | Path, *, strip_furniture: bool = True) -> ParsedDocument:
     """Dispatch on file extension. PDFs are the product; text files are fixtures."""
     path = Path(path)
     suffix = path.suffix.lower()
     if suffix == ".pdf":
-        return parse_pdf(path)
+        return parse_pdf(path, strip_furniture=strip_furniture)
     if suffix in {".txt", ".md", ".text"}:
-        return parse_text_file(path)
+        return parse_text_file(path, strip_furniture=strip_furniture)
     raise DocumentParseError(f"unsupported_file_type: {suffix or '(none)'}")
 
 
