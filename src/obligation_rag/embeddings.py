@@ -29,9 +29,18 @@ _TOKEN = re.compile(r"[a-z0-9]+")
 
 
 class EmbeddingBackend(ABC):
-    """Turns text into L2-normalized float32 vectors."""
+    """Turns text into L2-normalized float32 vectors.
+
+    Retrieval encoders are asymmetric: several families (e5, bge, nomic) were
+    trained with a short instruction glued to the front of queries, and a
+    different one — often nothing — on passages. Encoding both sides the same
+    way costs a large slice of their accuracy, silently. The prefixes are
+    configuration, so any model can be dropped in without touching code.
+    """
 
     name: str = "abstract"
+    query_prefix: str = ""
+    document_prefix: str = ""
 
     @property
     @abstractmethod
@@ -39,6 +48,18 @@ class EmbeddingBackend(ABC):
 
     @abstractmethod
     def encode(self, texts: list[str]) -> np.ndarray: ...
+
+    def encode_queries(self, texts: list[str]) -> np.ndarray:
+        """Encode search queries, applying the model's query instruction."""
+        if not self.query_prefix:
+            return self.encode(texts)
+        return self.encode([f"{self.query_prefix}{text}" for text in texts])
+
+    def encode_documents(self, texts: list[str]) -> np.ndarray:
+        """Encode chunks for indexing, applying the model's passage prefix."""
+        if not self.document_prefix:
+            return self.encode(texts)
+        return self.encode([f"{self.document_prefix}{text}" for text in texts])
 
     @staticmethod
     def _l2_normalize(matrix: np.ndarray) -> np.ndarray:
@@ -86,9 +107,17 @@ class SentenceTransformerBackend(EmbeddingBackend):
 
     name = "sentence-transformers"
 
-    def __init__(self, model_path: str, batch_size: int = 16) -> None:
+    def __init__(
+        self,
+        model_path: str,
+        batch_size: int = 16,
+        query_prefix: str = "",
+        document_prefix: str = "",
+    ) -> None:
         self.model_path = model_path
         self.batch_size = batch_size
+        self.query_prefix = query_prefix
+        self.document_prefix = document_prefix
         self._model = None
 
     def _load(self):
@@ -148,7 +177,12 @@ def _build_embedding_backend(settings: Settings) -> EmbeddingBackend | None:
         return None
 
     try:
-        backend = SentenceTransformerBackend(model_path, batch_size=settings.embedding_batch_size)
+        backend = SentenceTransformerBackend(
+            model_path,
+            batch_size=settings.embedding_batch_size,
+            query_prefix=settings.embedding_query_prefix,
+            document_prefix=settings.embedding_document_prefix,
+        )
         backend.encode(["warmup"])  # fail fast at startup, not mid-ingestion
         return backend
     except Exception as error:  # pragma: no cover - depends on local install

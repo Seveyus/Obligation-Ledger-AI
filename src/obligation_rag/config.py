@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     embedding_model_path: str | None = None
     use_fake_embeddings: bool = False
     embedding_batch_size: int = 16
+    #: Instruction prefixes some retrieval encoders were trained with. Wrong or
+    #: missing prefixes cost accuracy silently — check the model card.
+    #: bge-*-en-v1.5: query "Represent this sentence for searching relevant passages: "
+    #: e5-*: query "query: " and document "passage: "
+    embedding_query_prefix: str = ""
+    embedding_document_prefix: str = ""
 
     # --- Storage / service ---
     rag_data_dir: Path = Path("./runtime-data")

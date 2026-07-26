@@ -109,7 +109,7 @@ class DocumentIndex:
         vector_scores = np.zeros(len(self.chunks), dtype=np.float32)
         rankings = [lexical_ranking]
         if self.embeddings is not None and self.backend is not None:
-            query_vector = self.backend.encode([query])[0]
+            query_vector = self.backend.encode_queries([query])[0]
             vector_scores = self.embeddings @ query_vector  # both L2-normalized -> cosine
             vector_ranking = [
                 chunk_ids[i] for i in np.argsort(-vector_scores)[: self.candidate_pool]

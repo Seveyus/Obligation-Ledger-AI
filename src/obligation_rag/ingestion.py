@@ -94,7 +94,7 @@ def ingest_bytes(
     embeddings = None
     if backend is not None and chunks:
         try:
-            embeddings = backend.encode([chunk.text for chunk in chunks])
+            embeddings = backend.encode_documents([chunk.text for chunk in chunks])
             storage.save_embeddings(settings, resolved_id, embeddings)
         except Exception as error:  # noqa: BLE001 - the dense path is optional
             logger.warning("embedding failed (%s); document stays BM25-only", error)

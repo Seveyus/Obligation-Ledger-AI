@@ -112,3 +112,40 @@ def test_a_term_present_in_every_chunk_still_retrieves(settings, parsed_contract
 
 def test_top_k_is_honoured(bm25_index):
     assert len(bm25_index.search("agreement", top_k=2)) <= 2
+
+
+def test_prefixes_are_applied_to_the_right_side():
+    """e5/bge-style instructions: queries and passages are encoded differently."""
+    import numpy as np
+
+    from obligation_rag.embeddings import EmbeddingBackend
+
+    seen: list[str] = []
+
+    class _Recording(EmbeddingBackend):
+        query_prefix = "query: "
+        document_prefix = "passage: "
+
+        @property
+        def dimension(self) -> int:
+            return 2
+
+        def encode(self, texts):
+            seen.extend(texts)
+            return np.zeros((len(texts), 2), dtype=np.float32)
+
+    backend = _Recording()
+    backend.encode_queries(["how much notice?"])
+    backend.encode_documents(["Either party may terminate."])
+
+    assert seen == ["query: how much notice?", "passage: Either party may terminate."]
+
+
+def test_no_prefix_configured_means_text_is_untouched():
+    from obligation_rag.embeddings import HashingEmbeddingBackend
+
+    backend = HashingEmbeddingBackend()
+    same = backend.encode_queries(["termination notice"])
+    direct = backend.encode(["termination notice"])
+
+    assert (same == direct).all()

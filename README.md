@@ -228,6 +228,7 @@ Everything is environment-driven ([.env.example](.env.example)):
 | `LLM_MODEL` | `gpt-oss-120b` | Model name passed through to the server |
 | `USE_FAKE_LLM` | `false` | Run the pipeline with the deterministic rule-based adapter |
 | `EMBEDDING_MODEL_PATH` | *(empty)* | Local sentence-transformers directory; empty ⇒ BM25-only |
+| `EMBEDDING_QUERY_PREFIX` / `EMBEDDING_DOCUMENT_PREFIX` | *(empty)* | Instruction prefixes the encoder expects (bge, e5, …) |
 | `USE_FAKE_EMBEDDINGS` | `false` | Deterministic hashed vectors, for testing hybrid retrieval without weights |
 | `RAG_DATA_DIR` | `./runtime-data` | Uploads, SQLite database, vector indexes |
 | `RAG_HOST` / `RAG_PORT` | `127.0.0.1` / `8001` | Bind address |
@@ -237,6 +238,27 @@ Everything is environment-driven ([.env.example](.env.example)):
 
 No weights are ever downloaded, and no request ever leaves the machine: the
 only outbound connection is to `LLM_BASE_URL`.
+
+### Enabling dense retrieval offline
+
+Download the encoder once on a connected machine, copy the directory across,
+point `EMBEDDING_MODEL_PATH` at it. The model is loaded with
+`local_files_only=True` and never contacts a hub.
+
+```bash
+pip install "huggingface_hub[cli]"
+hf download BAAI/bge-small-en-v1.5 --local-dir ./bge-small-en-v1.5
+# copy ./bge-small-en-v1.5 onto the box, then:
+#   EMBEDDING_MODEL_PATH=/srv/models/bge-small-en-v1.5
+#   EMBEDDING_QUERY_PREFIX="Represent this sentence for searching relevant passages: "
+uv pip install -e ".[embeddings]"
+```
+
+Then **re-ingest every document**: vectors are written per document at ingest
+time, so contracts indexed before the encoder existed stay BM25-only. Check
+`GET /health` — `retrieval_mode` must read `hybrid_bm25_vector_rrf`. If the
+model fails to load the service logs a warning and falls back to BM25 rather
+than failing, so `health` is the thing to trust, not the absence of errors.
 
 ## How it works
 
