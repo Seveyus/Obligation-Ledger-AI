@@ -134,6 +134,26 @@ def preceding_checkbox(text: str, position: int) -> str | None:
     return None
 
 
+def locate_value(page_text: str, start: int, end: int, value: str | None) -> int:
+    """Offset of ``value`` inside the matched span, or the span start.
+
+    A quote often covers a whole option block — the empty box and the ticked
+    one — so anchoring the checkbox test on the span start would condemn a
+    value that was in fact selected. The test belongs on the value itself.
+    """
+    if not value:
+        return start
+    span = page_text[start:end]
+    normalized_span, offsets = normalize_with_map(span)
+    normalized_value = normalize_text(value)
+    if not normalized_value:
+        return start
+    index = normalized_span.find(normalized_value)
+    if index == -1 or index >= len(offsets):
+        return start
+    return start + offsets[index]
+
+
 def unchecked_option_reason(text: str, position: int) -> str | None:
     """Failure reason when the quote belongs to an option that was not ticked."""
     marker = preceding_checkbox(text, position)
@@ -181,8 +201,13 @@ def verify_quote_on_page(
     fuzzy_max_length_ratio: float = 1.35,
     min_quote_chars: int = 12,
     reject_unchecked_options: bool = True,
+    value: str | None = None,
 ) -> VerificationOutcome:
-    """Check whether ``quote`` really appears in ``page_text``."""
+    """Check whether ``quote`` really appears in ``page_text``.
+
+    ``value`` is the claimed value the quote is meant to support. When given,
+    the checkbox test anchors on it rather than on the start of the quote.
+    """
     normalized_quote = normalize_text(quote)
     if len(normalized_quote) < min_quote_chars:
         return VerificationOutcome(
@@ -201,7 +226,8 @@ def verify_quote_on_page(
         start, end, matched = _span_to_original(
             offsets, page_text, index, index + len(normalized_quote)
         )
-        rejection = unchecked_option_reason(page_text, start) if reject_unchecked_options else None
+        anchor = locate_value(page_text, start, end, value)
+        rejection = unchecked_option_reason(page_text, anchor) if reject_unchecked_options else None
         return VerificationOutcome(
             verified=rejection is None,
             method=VerificationMethod.NORMALIZED_EXACT_MATCH
@@ -252,7 +278,8 @@ def verify_quote_on_page(
             similarity=similarity,
         )
     start, end, matched = _span_to_original(offsets, page_text, span_start, span_end)
-    rejection = unchecked_option_reason(page_text, start) if reject_unchecked_options else None
+    anchor = locate_value(page_text, start, end, value)
+    rejection = unchecked_option_reason(page_text, anchor) if reject_unchecked_options else None
     return VerificationOutcome(
         verified=rejection is None,
         method=VerificationMethod.FUZZY_MATCH if not rejection else VerificationMethod.NONE,
@@ -274,6 +301,7 @@ def verify_evidence(
     fuzzy_max_length_ratio: float = 1.35,
     min_quote_chars: int = 12,
     reject_unchecked_options: bool = True,
+    value: str | None = None,
 ) -> VerificationOutcome:
     """Verify ``quote`` against ``pages``.
 
@@ -281,11 +309,12 @@ def verify_evidence(
     result. If the quote turns out to live on a different page the outcome is
     still a failure, but the reason names the real page.
     """
-    options: dict[str, float | int | bool] = {
+    options: dict[str, float | int | bool | str | None] = {
         "fuzzy_threshold": fuzzy_threshold,
         "fuzzy_max_length_ratio": fuzzy_max_length_ratio,
         "min_quote_chars": min_quote_chars,
         "reject_unchecked_options": reject_unchecked_options,
+        "value": value,
     }
 
     if claimed_page is not None:
@@ -318,7 +347,7 @@ def _find_on_any_page(
     pages: dict[int, str],
     *,
     skip: int | None,
-    **options: float | int | bool,
+    **options: float | int | bool | str | None,
 ) -> VerificationOutcome | None:
     for page_number in sorted(pages):
         if page_number == skip:

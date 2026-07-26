@@ -275,6 +275,9 @@ def _build_candidate(
         fuzzy_max_length_ratio=settings.fuzzy_max_length_ratio,
         min_quote_chars=settings.min_quote_chars,
         reject_unchecked_options=settings.reject_unchecked_options,
+        # Anchors the checkbox test on the value, not on wherever the quote
+        # happens to begin — quotes routinely cover a whole option block.
+        value=proposal.raw_value,
     )
 
     evidence = SourceEvidence(

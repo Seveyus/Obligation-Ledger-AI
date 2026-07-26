@@ -94,6 +94,24 @@ def test_inline_options_on_one_line_are_resolved_individually():
     assert unchecked_option_reason(line, line.index("Sewage")) is not None
 
 
+def test_a_quote_covering_both_options_is_judged_on_the_value():
+    """Found on the real PDF: the quote opens on the empty box but the value
+    it supports is the ticked one. Judging the span start condemned it."""
+    page = (
+        "such insurance to have: (Check one)\n"
+        "☐ A minimum aggregate policy in the amount of no less than $__________\n"
+        "☒ Limits of liability of not less than $1,000,000 per occurrence\n"
+    )
+    quote = (
+        "☐ A minimum aggregate policy in the amount of no less than $__________\n"
+        "☒ Limits of liability of not less than $1,000,000 per occurrence"
+    )
+
+    assert verify_quote_on_page(quote, page, page=11, value="$1,000,000").verified
+    assert not verify_quote_on_page(quote, page, page=11, value="minimum aggregate").verified
+    assert not verify_quote_on_page(quote, page, page=11).verified  # no value: span start rules
+
+
 def test_the_rule_can_be_switched_off():
     outcome = verify_quote_on_page(
         "☐ Rent will NOT be increased.", PAGE, page=3, reject_unchecked_options=False
