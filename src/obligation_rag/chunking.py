@@ -27,8 +27,13 @@ class Chunk:
     page: int
     index_in_page: int
     text: str
+    #: Offsets into the *page* text.
     start_offset: int
     end_offset: int
+    #: Offsets into the *whole document* text, when the caller supplied one
+    #: (see retriever.py). None for documents this service parsed itself.
+    doc_start_offset: int | None = None
+    doc_end_offset: int | None = None
 
 
 def _segments(page_text: str) -> list[str]:

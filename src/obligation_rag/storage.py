@@ -58,6 +58,8 @@ CREATE TABLE IF NOT EXISTS chunks (
     text          TEXT NOT NULL,
     start_offset  INTEGER NOT NULL,
     end_offset    INTEGER NOT NULL,
+    doc_start_offset INTEGER,
+    doc_end_offset   INTEGER,
     PRIMARY KEY (document_id, chunk_id),
     FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
 );
@@ -101,9 +103,21 @@ def connect(settings: Settings) -> Iterator[sqlite3.Connection]:
         connection.close()
 
 
+#: Columns added after the first release. `CREATE TABLE IF NOT EXISTS` cannot
+#: add them to a database that already exists, so they are applied by hand.
+_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    ("chunks", "doc_start_offset", "INTEGER"),
+    ("chunks", "doc_end_offset", "INTEGER"),
+)
+
+
 def init_db(settings: Settings) -> None:
     with connect(settings) as connection:
         connection.executescript(SCHEMA)
+        for table, column, column_type in _MIGRATIONS:
+            existing = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+            if column not in existing:
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
 
 
 # --------------------------------------------------------------------------
@@ -220,8 +234,9 @@ def insert_chunks(settings: Settings, chunks: Iterable[Chunk]) -> None:
         connection.executemany(
             """
             INSERT OR REPLACE INTO chunks
-                (chunk_id, document_id, page, index_in_page, text, start_offset, end_offset)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (chunk_id, document_id, page, index_in_page, text, start_offset,
+                 end_offset, doc_start_offset, doc_end_offset)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -232,6 +247,8 @@ def insert_chunks(settings: Settings, chunks: Iterable[Chunk]) -> None:
                     chunk.text,
                     chunk.start_offset,
                     chunk.end_offset,
+                    chunk.doc_start_offset,
+                    chunk.doc_end_offset,
                 )
                 for chunk in chunks
             ],
@@ -256,6 +273,30 @@ def get_chunks(settings: Settings, document_id: str) -> list[Chunk]:
             text=row["text"],
             start_offset=int(row["start_offset"]),
             end_offset=int(row["end_offset"]),
+            doc_start_offset=row["doc_start_offset"],
+            doc_end_offset=row["doc_end_offset"],
+        )
+        for row in rows
+    ]
+
+
+def get_all_chunks(settings: Settings) -> list[Chunk]:
+    """Every chunk of every document, for corpus-wide retrieval."""
+    with connect(settings) as connection:
+        rows = connection.execute(
+            "SELECT * FROM chunks ORDER BY document_id, page, index_in_page"
+        ).fetchall()
+    return [
+        Chunk(
+            chunk_id=row["chunk_id"],
+            document_id=row["document_id"],
+            page=int(row["page"]),
+            index_in_page=int(row["index_in_page"]),
+            text=row["text"],
+            start_offset=int(row["start_offset"]),
+            end_offset=int(row["end_offset"]),
+            doc_start_offset=row["doc_start_offset"],
+            doc_end_offset=row["doc_end_offset"],
         )
         for row in rows
     ]
