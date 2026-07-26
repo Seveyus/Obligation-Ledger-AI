@@ -109,6 +109,42 @@ def normalize_text(text: str) -> str:
     return normalize_with_map(text)[0]
 
 
+#: Form contracts express values as selected options. A quote lifted from an
+#: *unselected* option is a real quote of a value that does not apply — the
+#: dominant failure mode on filled templates, and one that plain substring
+#: matching cannot see.
+CHECKED_MARKERS = "☒☑"
+UNCHECKED_MARKERS = "☐"
+_CHECKBOX_MARKERS = CHECKED_MARKERS + UNCHECKED_MARKERS
+
+
+def preceding_checkbox(text: str, position: int) -> str | None:
+    """Nearest checkbox marker at or before ``position``, on the same line.
+
+    The marker may be the first character of the span itself ("☒ 3% each
+    renewal term") or sit just before it ("☒ " + "3% each renewal term"), so
+    both are searched. The search never crosses a line break: a checkbox on a
+    previous line governs a different option.
+    """
+    line_start = text.rfind("\n", 0, position) + 1
+    # +2 so a marker that opens the span itself still counts as governing it.
+    for index in range(min(position + 2, len(text)) - 1, line_start - 1, -1):
+        if text[index] in _CHECKBOX_MARKERS:
+            return text[index]
+    return None
+
+
+def unchecked_option_reason(text: str, position: int) -> str | None:
+    """Failure reason when the quote belongs to an option that was not ticked."""
+    marker = preceding_checkbox(text, position)
+    if marker and marker in UNCHECKED_MARKERS:
+        return (
+            "unchecked_option: the quote is a form option that was NOT selected "
+            f"({marker}); the value does not apply to this contract"
+        )
+    return None
+
+
 @dataclass(slots=True)
 class VerificationOutcome:
     verified: bool
@@ -144,6 +180,7 @@ def verify_quote_on_page(
     fuzzy_threshold: float = 0.92,
     fuzzy_max_length_ratio: float = 1.35,
     min_quote_chars: int = 12,
+    reject_unchecked_options: bool = True,
 ) -> VerificationOutcome:
     """Check whether ``quote`` really appears in ``page_text``."""
     normalized_quote = normalize_text(quote)
@@ -164,9 +201,13 @@ def verify_quote_on_page(
         start, end, matched = _span_to_original(
             offsets, page_text, index, index + len(normalized_quote)
         )
+        rejection = unchecked_option_reason(page_text, start) if reject_unchecked_options else None
         return VerificationOutcome(
-            verified=True,
-            method=VerificationMethod.NORMALIZED_EXACT_MATCH,
+            verified=rejection is None,
+            method=VerificationMethod.NORMALIZED_EXACT_MATCH
+            if not rejection
+            else VerificationMethod.NONE,
+            reason=rejection,
             page=page,
             matched_text=matched,
             start_offset=start,
@@ -211,10 +252,11 @@ def verify_quote_on_page(
             similarity=similarity,
         )
     start, end, matched = _span_to_original(offsets, page_text, span_start, span_end)
+    rejection = unchecked_option_reason(page_text, start) if reject_unchecked_options else None
     return VerificationOutcome(
-        verified=True,
-        method=VerificationMethod.FUZZY_MATCH,
-        reason=f"fuzzy_match similarity={similarity:.3f}",
+        verified=rejection is None,
+        method=VerificationMethod.FUZZY_MATCH if not rejection else VerificationMethod.NONE,
+        reason=rejection or f"fuzzy_match similarity={similarity:.3f}",
         page=page,
         matched_text=matched,
         start_offset=start,
@@ -231,6 +273,7 @@ def verify_evidence(
     fuzzy_threshold: float = 0.92,
     fuzzy_max_length_ratio: float = 1.35,
     min_quote_chars: int = 12,
+    reject_unchecked_options: bool = True,
 ) -> VerificationOutcome:
     """Verify ``quote`` against ``pages``.
 
@@ -238,10 +281,11 @@ def verify_evidence(
     result. If the quote turns out to live on a different page the outcome is
     still a failure, but the reason names the real page.
     """
-    options = {
+    options: dict[str, float | int | bool] = {
         "fuzzy_threshold": fuzzy_threshold,
         "fuzzy_max_length_ratio": fuzzy_max_length_ratio,
         "min_quote_chars": min_quote_chars,
+        "reject_unchecked_options": reject_unchecked_options,
     }
 
     if claimed_page is not None:
@@ -274,7 +318,7 @@ def _find_on_any_page(
     pages: dict[int, str],
     *,
     skip: int | None,
-    **options: float | int,
+    **options: float | int | bool,
 ) -> VerificationOutcome | None:
     for page_number in sorted(pages):
         if page_number == skip:

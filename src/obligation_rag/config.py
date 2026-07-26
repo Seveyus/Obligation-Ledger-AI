@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     fuzzy_match_threshold: float = 0.92
     fuzzy_max_length_ratio: float = 1.35
     min_quote_chars: int = 12
+    #: Reject a quote lifted from an unticked form option (☐).
+    reject_unchecked_options: bool = True
+
+    # --- Parsing ---
+    #: Drop running headers/footers repeated across pages.
+    strip_page_furniture: bool = True
 
     @property
     def uploads_dir(self) -> Path:
