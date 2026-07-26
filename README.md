@@ -254,8 +254,15 @@ src/obligation_rag/
 ├── verification.py  deterministic source-evidence checking
 ├── date_math.py     deterministic date arithmetic
 ├── storage.py       SQLite + .npy vector files
-└── api.py           FastAPI surface
+├── api.py           FastAPI surface (HTTP integration)
+└── retriever.py     index/retrieve/extract (in-process integration)
 ```
+
+**Two ways to integrate.** Over HTTP (the FastAPI service above), or in-process
+via [retriever.py](src/obligation_rag/retriever.py), which implements the main
+backend's `index()` / `retrieve()` / `extract()` module contract and returns
+offsets in the caller's own `ParsedDoc.text` coordinates. Same pipeline, same
+guarantees — see [docs/INTEGRATION.md §11](docs/INTEGRATION.md).
 
 **Retrieval.** BM25 (lexical) and local embeddings (semantic) are fused with
 Reciprocal Rank Fusion rather than a weighted score blend — BM25 scores and

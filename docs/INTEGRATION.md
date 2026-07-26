@@ -9,6 +9,16 @@ OpenAPI schema: `GET /openapi.json` · Swagger UI: `/docs`.
 
 ---
 
+There are two ways to consume this service. Pick one:
+
+- **HTTP** (§1–8) — the service runs on its own port, you call it with `requests`.
+- **In-process** (§11) — you `import retriever` and call three functions. Use
+  this if the pipeline already imports a `retriever` module.
+
+Both are the same pipeline underneath and return the same guarantees.
+
+---
+
 ## 1. The minimum path
 
 ```python
@@ -318,3 +328,113 @@ The fake adapter is rule-based over the *retrieved text*, so the quotes it
 returns are genuine spans of the document and the verification path is
 exercised for real. Aditya can build the entire approval UI against it before
 `gpt-oss-120b` is up, and the JSON shape is identical.
+
+---
+
+## 11. In-process integration (`retriever.py`)
+
+[src/obligation_rag/retriever.py](../src/obligation_rag/retriever.py) implements
+the module contract the pipeline expects — same functions, same conventions
+(int `contract_id`, called after a successful parse, never raises):
+
+```python
+def index(contract_id: int, doc: ParsedDoc) -> int
+def retrieve(query: str, k: int = 8, contract_id: int | None = None) -> list[Passage]
+def extract(contract_id: int, doc: ParsedDoc) -> ExtractionResult   # <- added
+```
+
+`ParsedDoc` and `Passage` are imported from your `ingest.py` when present, so
+your definitions stay authoritative. Copy the module in, or install this
+package and re-export:
+
+```python
+# retriever.py in your repo
+from obligation_rag.retriever import index, retrieve, extract  # noqa: F401
+```
+
+### Coordinate system
+
+Every offset returned — `Passage.char_start/char_end` and
+`Evidence.char_start/char_end` — indexes **`ParsedDoc.text`**, the same
+normalised string your UI displays:
+
+```python
+doc.text[passage.char_start : passage.char_end] == passage.text          # always true
+doc.text[ev.char_start : ev.char_end] == ev.quote                        # always true
+```
+
+The document is never re-parsed or re-normalised on this side: page text is
+sliced out of `doc.text` using `Page.char_start`, so the indexed text, the text
+quotes are verified against, and the text the reviewer reads are the same
+string. If you change normalisation in `ingest.py`, nothing here needs updating.
+
+### Why `extract()` and not just `retrieve()`
+
+`Passage` carries `text, page, char_start, char_end, score`. It has no place to
+put a verification status, so with `retrieve()` alone the trust guarantees never
+reach the UI, and the Register view (spec §6.2) cannot render:
+
+- a per-field badge `verified` / `computed` / `failed`
+- the supporting quote with its page
+- an **Approve button disabled when any field failed**
+
+`extract()` returns exactly that:
+
+```python
+@dataclass
+class Evidence:
+    quote: str; page: int
+    char_start: int | None; char_end: int | None   # into ParsedDoc.text
+
+@dataclass
+class Obligation:
+    field: str                  # 'contract_end_date', 'notice_deadline', ...
+    value: str | None           # normalised: '2026-03-31', 'P60D', 'USD 120000.00'
+    status: str                 # 'verified' | 'computed' | 'failed'
+    evidence: Evidence | None   # None for computed fields
+    reason: str | None          # why it failed, for the reviewer
+    formula: str | None         # computed fields only
+    inputs: dict | None         # what the formula was evaluated on
+
+@dataclass
+class ExtractionResult:
+    obligations: list[Obligation]
+    can_approve: bool           # False if any field failed - gate the button on this
+    failures: list[str]
+```
+
+These live in `retriever.py` today; move them to `ingest.py` if you prefer to
+keep all shared types on your side — the field names are what matter.
+
+### Usage
+
+```python
+import retriever
+
+n_chunks = retriever.index(contract.id, doc)      # after parse, before extract
+result   = retriever.extract(contract.id, doc)    # the Register view
+
+for obligation in result.obligations:
+    if obligation.evidence:
+        span = doc.text[obligation.evidence.char_start : obligation.evidence.char_end]
+        render_row(obligation.field, obligation.value, obligation.status, span)
+    else:
+        render_computed_row(obligation.field, obligation.value, obligation.formula)
+
+approve_button.enabled = result.can_approve
+
+# Ask tab / "where does this come from"
+passages = retriever.retrieve("what renews before November?", k=8)  # whole corpus
+```
+
+### Guarantees and limits
+
+- `index()` is idempotent per `contract_id`: re-indexing replaces the previous
+  pages, chunks and vectors instead of layering on top.
+- `retrieve()` and `extract()` never raise. `retrieve()` returns `[]`;
+  `extract()` returns `can_approve=False` with a `failures` entry.
+- `retrieve(contract_id=None)` searches the whole corpus, with BM25 statistics
+  computed corpus-wide so scores are comparable across contracts. Only
+  documents ingested through this module are included.
+- `extract()` will index the document itself if `index()` was skipped.
+- Everything is stored under `RAG_DATA_DIR`, independent of your own database.
