@@ -5,6 +5,7 @@ from __future__ import annotations
 from obligation_rag.retrieval import (
     RETRIEVAL_MODE_BM25,
     RETRIEVAL_MODE_HYBRID,
+    build_index,
     reciprocal_rank_fusion,
     tokenize,
 )
@@ -75,6 +76,38 @@ def test_hybrid_retrieval_still_ranks_the_fee_clause_first(hybrid_index):
 
 def test_query_with_no_lexical_or_semantic_signal_returns_nothing(bm25_index):
     assert bm25_index.search("zzzz qqqq xxxx", top_k=5) == []
+
+
+def test_a_single_chunk_document_is_still_retrievable(settings):
+    """BM25 idf is negative on a one-document corpus; the fallback covers it."""
+    from obligation_rag.chunking import Chunk
+
+    chunk = Chunk(
+        chunk_id="chunk_0",
+        document_id="doc",
+        page=1,
+        index_in_page=0,
+        text="A short agreement about the termination notice period.",
+        start_offset=0,
+        end_offset=54,
+    )
+    index = build_index("doc", [chunk], settings=settings)
+
+    hits = index.search("termination notice", top_k=5)
+
+    assert len(hits) == 1
+    assert hits[0].lexical_score > 0
+    assert index.search("zzzz qqqq", top_k=5) == []
+
+
+def test_a_term_present_in_every_chunk_still_retrieves(settings, parsed_contract):
+    """idf is 0 for a term in all documents - without a fallback: no results."""
+    from obligation_rag.chunking import chunk_document
+
+    chunks = chunk_document("doc", parsed_contract, chunk_size=1200, overlap=200)
+    index = build_index("doc", chunks, settings=settings)
+
+    assert index.search("Agreement", top_k=3)
 
 
 def test_top_k_is_honoured(bm25_index):

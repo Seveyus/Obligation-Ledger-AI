@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 
 import numpy as np
 from rank_bm25 import BM25Okapi
@@ -61,6 +62,8 @@ class DocumentIndex:
     backend: EmbeddingBackend | None = None
     rrf_k: int = 60
     candidate_pool: int = 25
+    #: Token set per chunk, for the degenerate-BM25 fallback below.
+    token_sets: list[set[str]] = dataclass_field(default_factory=list)
 
     @property
     def retrieval_mode(self) -> str:
@@ -71,9 +74,13 @@ class DocumentIndex:
         if not self.chunks:
             return []
 
-        chunk_ids = [chunk.chunk_id for chunk in self.chunks]
+        # Chunk ids are only unique *within* a document ("chunk_0" exists in
+        # every contract), so fusion has to key on the pair or a corpus-wide
+        # search would merge unrelated chunks.
+        chunk_ids = [f"{chunk.document_id}::{chunk.chunk_id}" for chunk in self.chunks]
 
-        lexical_raw = np.asarray(self.bm25.get_scores(tokenize(query)), dtype=np.float32)
+        query_tokens = tokenize(query)
+        lexical_raw = np.asarray(self.bm25.get_scores(query_tokens), dtype=np.float32)
         highest = float(lexical_raw.max()) if lexical_raw.size else 0.0
         lexical_scores = lexical_raw / highest if highest > 0 else lexical_raw
         lexical_ranking = [
@@ -81,6 +88,23 @@ class DocumentIndex:
             for i in np.argsort(-lexical_raw)[: self.candidate_pool]
             if lexical_raw[i] > 0
         ]
+
+        if not lexical_ranking and query_tokens:
+            # BM25 idf goes to zero for a term present in every chunk, and
+            # negative for a single-chunk corpus — a short contract would
+            # retrieve nothing at all. Fall back to raw token overlap, which
+            # still returns nothing when the query genuinely does not match.
+            wanted = set(query_tokens)
+            overlap = np.array(
+                [float(len(wanted & tokens)) for tokens in self.token_sets], dtype=np.float32
+            )
+            if overlap.size and overlap.max() > 0:
+                lexical_scores = overlap / overlap.max()
+                lexical_ranking = [
+                    chunk_ids[i]
+                    for i in np.argsort(-overlap)[: self.candidate_pool]
+                    if overlap[i] > 0
+                ]
 
         vector_scores = np.zeros(len(self.chunks), dtype=np.float32)
         rankings = [lexical_ranking]
@@ -96,7 +120,7 @@ class DocumentIndex:
         if not fused:  # no lexical hit and no vectors: nothing relevant
             return []
 
-        by_id = {chunk.chunk_id: index for index, chunk in enumerate(self.chunks)}
+        by_id = {key: position for position, key in enumerate(chunk_ids)}
         ordered = sorted(fused.items(), key=lambda item: (-item[1], item[0]))[:top_k]
 
         results: list[RetrievedChunk] = []
@@ -136,6 +160,7 @@ def build_index(
         backend=backend,
         rrf_k=settings.rrf_k,
         candidate_pool=settings.candidate_pool,
+        token_sets=[set(tokens) for tokens in corpus],
     )
 
 
@@ -168,12 +193,69 @@ def get_document_index(settings: Settings, document_id: str) -> DocumentIndex | 
     return index
 
 
+#: Reserved key for the index spanning every document.
+CORPUS_INDEX_ID = "__corpus__"
+
+
+def get_corpus_index(settings: Settings) -> DocumentIndex | None:
+    """Index over every chunk of every document (the "Ask across contracts" case).
+
+    BM25 statistics are computed over the whole corpus here, not per document,
+    which is what makes cross-contract scores comparable.
+    """
+    from . import storage
+
+    cached = _INDEX_CACHE.get(CORPUS_INDEX_ID)
+    if cached is not None:
+        return cached
+
+    chunks = storage.get_all_chunks(settings)
+    if not chunks:
+        return None
+
+    # Vectors only if every document has them; a partial matrix would silently
+    # rank half the corpus at zero.
+    embeddings = None
+    backend = None
+    per_document: dict[str, np.ndarray] = {}
+    document_ids = {chunk.document_id for chunk in chunks}
+    loaded = {
+        document_id: storage.load_embeddings(settings, document_id) for document_id in document_ids
+    }
+    if all(matrix is not None for matrix in loaded.values()):
+        per_document = {
+            document_id: matrix for document_id, matrix in loaded.items() if matrix is not None
+        }
+        counts = {document_id: 0 for document_id in document_ids}
+        rows = []
+        ok = True
+        for chunk in chunks:
+            matrix = per_document[chunk.document_id]
+            position = counts[chunk.document_id]
+            if position >= len(matrix):  # stale index on disk
+                ok = False
+                break
+            rows.append(matrix[position])
+            counts[chunk.document_id] = position + 1
+        if ok:
+            embeddings = np.vstack(rows)
+            backend = get_embedding_backend(settings)
+
+    index = build_index(
+        CORPUS_INDEX_ID, chunks, settings=settings, embeddings=embeddings, backend=backend
+    )
+    _INDEX_CACHE[CORPUS_INDEX_ID] = index
+    return index
+
+
 def cache_index(index: DocumentIndex) -> None:
     _INDEX_CACHE[index.document_id] = index
 
 
 def invalidate_index(document_id: str) -> None:
     _INDEX_CACHE.pop(document_id, None)
+    # Any single-document change invalidates corpus-wide BM25 statistics.
+    _INDEX_CACHE.pop(CORPUS_INDEX_ID, None)
 
 
 def clear_index_cache() -> None:
