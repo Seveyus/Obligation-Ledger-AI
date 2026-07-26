@@ -25,7 +25,7 @@ import re
 from abc import ABC, abstractmethod
 
 from .config import Settings
-from .date_math import parse_date, parse_duration
+from .date_math import find_dates, parse_duration
 from .schemas import LLMExtractionRequest, LLMExtractionResponse, LLMObligation, ObligationType
 
 logger = logging.getLogger(__name__)
@@ -239,10 +239,13 @@ class FakeLLMClient(LLMClient):
         lowered = sentence.lower()
         matches: list[tuple[ObligationType, str]] = []
 
-        parsed_date = parse_date(sentence)
+        # One clause often carries both ends of the term ("commence on … and
+        # ending at midnight on …"), so the first date opens it and the last
+        # date closes it.
+        dates = find_dates(sentence)
         duration = parse_duration(sentence)
 
-        if parsed_date and any(
+        if dates and any(
             keyword in lowered
             for keyword in (
                 "commence",
@@ -252,13 +255,23 @@ class FakeLLMClient(LLMClient):
                 "effective as of",
             )
         ):
-            matches.append((ObligationType.CONTRACT_START_DATE, parsed_date.isoformat()))
+            matches.append((ObligationType.CONTRACT_START_DATE, dates[0][1].isoformat()))
 
-        if parsed_date and any(
+        if dates and any(
             keyword in lowered
-            for keyword in ("expire", "expires", "end date", "terminate on", "through ", "until")
+            for keyword in (
+                "expire",
+                "expires",
+                "expiration",
+                "end date",
+                "ending",
+                "terminate on",
+                "termination date",
+                "through ",
+                "until",
+            )
         ):
-            matches.append((ObligationType.CONTRACT_END_DATE, parsed_date.isoformat()))
+            matches.append((ObligationType.CONTRACT_END_DATE, dates[-1][1].isoformat()))
 
         # A bare heading ("2.2 Automatic Renewal.") is a real quote but not
         # evidence of anything, so free-text matches need an actual clause.
@@ -273,8 +286,49 @@ class FakeLLMClient(LLMClient):
             if duration:
                 matches.append((ObligationType.RENEWAL_DURATION, duration.to_iso()))
 
+        # "…90 days prior to the Termination Date" in a renewal-option clause is
+        # a deadline to KEEP the contract, not to leave it. The mention of the
+        # Termination Date must not pull it into the termination bucket.
+        # A renewal clause states two very different durations: the length of
+        # the renewal term ("an additional 5 year term") and the notice needed
+        # to claim it ("not less than 90 days prior"). Only the second is a
+        # deadline, and only a notice-shaped phrasing identifies it.
+        renewal_context = any(
+            keyword in lowered
+            for keyword in ("option to renew", "exercised by providing", "notice of renewal")
+        )
+        notice_shaped = "notice" in lowered and any(
+            keyword in lowered
+            for keyword in ("not less than", "prior to", "no later than", "at least")
+        )
+        renewal_option = bool(duration) and renewal_context and notice_shaped
+        if renewal_option:
+            matches.append((ObligationType.RENEWAL_OPTION_NOTICE, duration.to_iso()))
+        elif duration and renewal_context and "term" in lowered:
+            matches.append((ObligationType.RENEWAL_DURATION, duration.to_iso()))
+
+        # A duration next to "terminate" is not automatically a notice period:
+        # "fail to cure within 15 days" is a cure period, "within 30 days after
+        # the occurrence of such casualty" is a casualty window. Both are real
+        # obligations, neither is the notice you must give to walk away.
+        other_clause = any(
+            keyword in lowered
+            for keyword in (
+                "cure",
+                "default",
+                "breach",
+                "casualty",
+                "damaged",
+                "destroyed",
+                "condemn",
+                "eminent domain",
+            )
+        )
+
         if (
             duration
+            and not renewal_option
+            and not other_clause
             and "notice" in lowered
             and any(
                 keyword in lowered

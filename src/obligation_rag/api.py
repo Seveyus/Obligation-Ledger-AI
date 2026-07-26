@@ -17,7 +17,11 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from . import __version__, storage
 from .config import Settings, get_settings
-from .date_math import compute_notice_deadline, compute_renewal_date
+from .date_math import (
+    compute_notice_deadline,
+    compute_renewal_date,
+    compute_renewal_option_deadline,
+)
 from .embeddings import get_embedding_backend
 from .extraction import DEFAULT_OBLIGATION_TYPES, run_extraction
 from .ingestion import UnsupportedDocumentError, ingest_bytes
@@ -271,6 +275,7 @@ def verify_evidence_endpoint(settings: SettingsDep, request: VerifyRequest) -> V
         fuzzy_threshold=settings.fuzzy_match_threshold,
         fuzzy_max_length_ratio=settings.fuzzy_max_length_ratio,
         min_quote_chars=settings.min_quote_chars,
+        reject_unchecked_options=settings.reject_unchecked_options,
     )
     return VerifyResponse(
         document_id=request.document_id,
@@ -290,6 +295,8 @@ def compute_deadline(request: DeadlineComputeRequest) -> DeadlineComputeResponse
     """Date arithmetic in code. The model never gets a vote here."""
     if request.operation is DeadlineOperation.RENEWAL_DATE:
         computation = compute_renewal_date(request.anchor_date, request.duration)
+    elif request.operation is DeadlineOperation.RENEWAL_OPTION_DEADLINE:
+        computation = compute_renewal_option_deadline(request.anchor_date, request.duration)
     else:
         computation = compute_notice_deadline(request.anchor_date, request.duration)
 

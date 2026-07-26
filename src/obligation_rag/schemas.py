@@ -23,6 +23,12 @@ class ObligationType(StrEnum):
     RENEWAL_DURATION = "renewal_duration"
     TERMINATION_NOTICE_PERIOD = "termination_notice_period"
     NOTICE_DEADLINE = "notice_deadline"
+    #: Notice a party must give to *exercise* a renewal option. The mirror image
+    #: of a termination notice: miss a termination notice and you are locked in
+    #: for another term; miss this one and the option "shall lapse and expire",
+    #: so you lose the renewal. Both are deadlines, with opposite consequences.
+    RENEWAL_OPTION_NOTICE = "renewal_option_notice"
+    RENEWAL_OPTION_DEADLINE = "renewal_option_deadline"
     PAYMENT_OBLIGATION = "payment_obligation"
     FEE_ESCALATION = "fee_escalation"
     INDEMNIFICATION = "indemnification"
@@ -41,6 +47,10 @@ OBLIGATION_TYPE_ALIASES: dict[str, ObligationType] = {
     "notice": ObligationType.TERMINATION_NOTICE_PERIOD,
     "notice_period": ObligationType.TERMINATION_NOTICE_PERIOD,
     "deadline": ObligationType.NOTICE_DEADLINE,
+    "renewal_notice": ObligationType.RENEWAL_OPTION_NOTICE,
+    "notice_of_renewal": ObligationType.RENEWAL_OPTION_NOTICE,
+    "option_to_renew_notice": ObligationType.RENEWAL_OPTION_NOTICE,
+    "renewal_deadline": ObligationType.RENEWAL_OPTION_DEADLINE,
     "renewal_term": ObligationType.RENEWAL_DURATION,
     "auto_renewal": ObligationType.AUTOMATIC_RENEWAL,
     "payment": ObligationType.PAYMENT_OBLIGATION,
@@ -257,6 +267,7 @@ class VerifyResponse(BaseModel):
 
 class DeadlineOperation(StrEnum):
     NOTICE_DEADLINE = "notice_deadline"
+    RENEWAL_OPTION_DEADLINE = "renewal_option_deadline"
     RENEWAL_DATE = "renewal_date"
 
 

@@ -195,6 +195,26 @@ def parse_date(text: str) -> date | None:
     return None
 
 
+def find_dates(text: str) -> list[tuple[int, date]]:
+    """Every parseable date with its offset, left to right, no overlaps.
+
+    Needed because one clause routinely carries two dates — "shall commence on
+    February 1, 2026 and ending at midnight on January 31, 2031" — and taking
+    the first one for both ends of the term is how a term end silently becomes
+    a start date.
+    """
+    spans: list[tuple[int, int, date]] = []
+    for pattern in (_ISO_DATE, _MONTH_FIRST, _DAY_FIRST, _US_SLASH):
+        for match in pattern.finditer(text):
+            parsed = parse_date(match.group(0))
+            if parsed is None:
+                continue
+            if any(match.start() < end and start < match.end() for start, end, _ in spans):
+                continue  # already covered by another pattern
+            spans.append((match.start(), match.end(), parsed))
+    return [(start, parsed) for start, _, parsed in sorted(spans)]
+
+
 def _words_to_number(words: str) -> int | None:
     total = 0
     current = 0
@@ -305,6 +325,35 @@ def compute_notice_deadline(anchor_date: str, duration: str) -> DateComputation:
         "contract_end_date_iso": parsed_date.isoformat(),
         "termination_notice_period_iso": parsed_duration.to_iso(),
         "operation": "subtract",
+        "evaluated": (
+            f"{parsed_date.isoformat()} - {parsed_duration.humanize()} = {result.isoformat()}"
+        ),
+    }
+    return DateComputation(result, formula, inputs)
+
+
+def compute_renewal_option_deadline(anchor_date: str, duration: str) -> DateComputation:
+    """``renewal_option_deadline = contract_end_date - renewal_option_notice``.
+
+    Same arithmetic as a notice deadline, opposite consequence: this is the last
+    day to *exercise* a renewal option before it lapses.
+    """
+    formula = "renewal_option_deadline = contract_end_date - renewal_option_notice"
+    inputs: dict[str, Any] = {"contract_end_date": anchor_date, "renewal_option_notice": duration}
+
+    parsed_date = parse_date(anchor_date)
+    parsed_duration = parse_duration(duration)
+    if parsed_date is None:
+        return DateComputation(None, formula, inputs, error=f"unparseable_date: {anchor_date!r}")
+    if parsed_duration is None:
+        return DateComputation(None, formula, inputs, error=f"unparseable_duration: {duration!r}")
+
+    result = shift_date(parsed_date, parsed_duration, sign=-1)
+    inputs |= {
+        "contract_end_date_iso": parsed_date.isoformat(),
+        "renewal_option_notice_iso": parsed_duration.to_iso(),
+        "operation": "subtract",
+        "consequence": "the renewal option lapses after this date",
         "evaluated": (
             f"{parsed_date.isoformat()} - {parsed_duration.humanize()} = {result.isoformat()}"
         ),

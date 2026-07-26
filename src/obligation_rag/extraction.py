@@ -20,7 +20,12 @@ import re
 import time
 
 from .config import Settings
-from .date_math import compute_notice_deadline, parse_date, parse_duration
+from .date_math import (
+    compute_notice_deadline,
+    compute_renewal_option_deadline,
+    parse_date,
+    parse_duration,
+)
 from .llm_client import LLMClient, LLMClientError, get_llm_client
 from .retrieval import DocumentIndex
 from .schemas import (
@@ -62,6 +67,13 @@ QUERY_TEMPLATES: dict[ObligationType, str] = {
     ObligationType.NOTICE_DEADLINE: (
         "notice must be given no later than deadline to provide notice of non-renewal"
     ),
+    ObligationType.RENEWAL_OPTION_NOTICE: (
+        "option to renew shall be exercised by providing written notice given not less than "
+        "days prior to the termination date lapse and expire"
+    ),
+    ObligationType.RENEWAL_OPTION_DEADLINE: (
+        "last day to exercise the option to renew before it lapses"
+    ),
     ObligationType.PAYMENT_OBLIGATION: (
         "fees payable payment terms invoice net days annual fee amount due customer shall pay"
     ),
@@ -82,13 +94,19 @@ QUERY_TEMPLATES: dict[ObligationType, str] = {
 DEFAULT_OBLIGATION_TYPES: list[ObligationType] = list(ObligationType)
 
 #: Never asked of the model — computed from verified inputs instead.
-COMPUTED_ONLY_TYPES: frozenset[ObligationType] = frozenset({ObligationType.NOTICE_DEADLINE})
+COMPUTED_ONLY_TYPES: frozenset[ObligationType] = frozenset(
+    {ObligationType.NOTICE_DEADLINE, ObligationType.RENEWAL_OPTION_DEADLINE}
+)
 
 DATE_TYPES: frozenset[ObligationType] = frozenset(
     {ObligationType.CONTRACT_START_DATE, ObligationType.CONTRACT_END_DATE}
 )
 DURATION_TYPES: frozenset[ObligationType] = frozenset(
-    {ObligationType.TERMINATION_NOTICE_PERIOD, ObligationType.RENEWAL_DURATION}
+    {
+        ObligationType.TERMINATION_NOTICE_PERIOD,
+        ObligationType.RENEWAL_DURATION,
+        ObligationType.RENEWAL_OPTION_NOTICE,
+    }
 )
 MONEY_TYPES: frozenset[ObligationType] = frozenset(
     {ObligationType.PAYMENT_OBLIGATION, ObligationType.LIABILITY_CAP}
@@ -108,7 +126,20 @@ _SCALE = {
     "billion": 1_000_000_000,
 }
 _PERCENT = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*(?:%|percent)", re.IGNORECASE)
-_NEGATIVE_RENEWAL = ("not automatically renew", "shall not renew", "no automatic renewal")
+#: A renewal that a party must *choose* is not an automatic renewal. Filled
+#: lease forms say "This Lease may be renewed" and mean the opposite of a
+#: hands-off evergreen clause, so these phrasings normalise to false.
+_NEGATIVE_RENEWAL = (
+    "not automatically renew",
+    "shall not renew",
+    "no automatic renewal",
+    "may not be renewed",
+    "may be renewed",
+    "option to renew",
+    "shall have the option",
+    "at tenant's option",
+    "at its option",
+)
 
 
 # --------------------------------------------------------------------------
@@ -243,6 +274,7 @@ def _build_candidate(
         fuzzy_threshold=settings.fuzzy_match_threshold,
         fuzzy_max_length_ratio=settings.fuzzy_max_length_ratio,
         min_quote_chars=settings.min_quote_chars,
+        reject_unchecked_options=settings.reject_unchecked_options,
     )
 
     evidence = SourceEvidence(
@@ -292,8 +324,27 @@ def _build_candidate(
 # --------------------------------------------------------------------------
 
 
+#: Derived deadline -> (notice input type, computation). Both are
+#: ``end_date - notice`` but they mean opposite things to the reviewer, so they
+#: are separate rows in the ledger with separate labels.
+DERIVED_DEADLINES: tuple[tuple[ObligationType, ObligationType, str], ...] = (
+    (
+        ObligationType.NOTICE_DEADLINE,
+        ObligationType.TERMINATION_NOTICE_PERIOD,
+        "notice_deadline",
+    ),
+    (
+        ObligationType.RENEWAL_OPTION_DEADLINE,
+        ObligationType.RENEWAL_OPTION_NOTICE,
+        "renewal_option_deadline",
+    ),
+)
+
+
 def compute_derived_obligations(
-    document_id: str, obligations: list[CandidateObligation]
+    document_id: str,
+    obligations: list[CandidateObligation],
+    requested: list[ObligationType] | None = None,
 ) -> tuple[list[CandidateObligation], list[ExtractionFailure]]:
     """Compute deadlines in code from verified inputs only."""
     by_type = {
@@ -302,57 +353,100 @@ def compute_derived_obligations(
         if obligation.status in APPROVABLE_STATUSES
     }
     end_date = by_type.get(ObligationType.CONTRACT_END_DATE)
-    notice = by_type.get(ObligationType.TERMINATION_NOTICE_PERIOD)
 
-    if not end_date or not notice or not end_date.normalized_value or not notice.normalized_value:
+    derived: list[CandidateObligation] = []
+    failures: list[ExtractionFailure] = []
+
+    for deadline_type, notice_type, label in DERIVED_DEADLINES:
+        if requested is not None and deadline_type not in requested:
+            continue
+        notice = by_type.get(notice_type)
+
+        if end_date is None or notice is None:
+            missing = [
+                name
+                for name, value in (
+                    ("contract_end_date", end_date),
+                    (notice_type.value, notice),
+                )
+                if value is None
+            ]
+            # A contract has either a termination notice or a renewal option,
+            # rarely both; only report the one whose notice was actually found.
+            if notice is not None and missing:
+                failures.append(
+                    ExtractionFailure(
+                        obligation_type=deadline_type,
+                        reason="missing_verified_inputs",
+                        detail=(
+                            f"{label} was not computed because these verified inputs are "
+                            f"missing: {', '.join(missing)}"
+                        ),
+                    )
+                )
+            continue
+
+        if not end_date.normalized_value or not notice.normalized_value:
+            continue
+
+        computation = (
+            compute_notice_deadline(end_date.normalized_value, notice.normalized_value)
+            if deadline_type is ObligationType.NOTICE_DEADLINE
+            else compute_renewal_option_deadline(end_date.normalized_value, notice.normalized_value)
+        )
+        if not computation.ok:
+            failures.append(
+                ExtractionFailure(
+                    obligation_type=deadline_type,
+                    reason="computation_failed",
+                    detail=computation.error,
+                )
+            )
+            continue
+
+        inputs = dict(computation.inputs)
+        inputs["source_obligation_ids"] = [end_date.id, notice.id]
+        derived.append(
+            CandidateObligation(
+                id=f"{document_id}:{deadline_type.value}",
+                document_id=document_id,
+                obligation_type=deadline_type,
+                raw_value=computation.result_iso or "",
+                normalized_value=computation.result_iso,
+                source_evidence=None,  # derived, not quoted: its evidence is its inputs
+                status=ObligationStatus.COMPUTED,
+                verification_method=VerificationMethod.DETERMINISTIC_COMPUTATION,
+                verification_reason="calculated in code, not model output",
+                computation_formula=computation.formula,
+                computation_inputs=inputs,
+            )
+        )
+
+    # Nothing derived and nothing reported: say once what was missing, rather
+    # than letting a contract with no deadline at all pass unremarked.
+    if not derived and not failures:
+        deadline_type, notice_type, label = DERIVED_DEADLINES[0]
+        wanted = requested if requested is not None else [pair[0] for pair in DERIVED_DEADLINES]
         missing = [
             name
             for name, value in (
                 ("contract_end_date", end_date),
-                ("termination_notice_period", notice),
+                (notice_type.value, by_type.get(notice_type)),
             )
             if value is None
         ]
-        if missing:
-            return [], [
+        if deadline_type in wanted and missing:
+            failures.append(
                 ExtractionFailure(
-                    obligation_type=ObligationType.NOTICE_DEADLINE,
+                    obligation_type=deadline_type,
                     reason="missing_verified_inputs",
                     detail=(
-                        "notice_deadline was not computed because these verified inputs are "
+                        f"{label} was not computed because these verified inputs are "
                         f"missing: {', '.join(missing)}"
                     ),
                 )
-            ]
-        return [], []
-
-    computation = compute_notice_deadline(end_date.normalized_value, notice.normalized_value)
-    inputs = dict(computation.inputs)
-    inputs["source_obligation_ids"] = [end_date.id, notice.id]
-
-    if not computation.ok:
-        return [], [
-            ExtractionFailure(
-                obligation_type=ObligationType.NOTICE_DEADLINE,
-                reason="computation_failed",
-                detail=computation.error,
             )
-        ]
-
-    deadline = CandidateObligation(
-        id=f"{document_id}:{ObligationType.NOTICE_DEADLINE.value}",
-        document_id=document_id,
-        obligation_type=ObligationType.NOTICE_DEADLINE,
-        raw_value=computation.result_iso or "",
-        normalized_value=computation.result_iso,
-        source_evidence=None,  # derived, not quoted: its evidence is its inputs
-        status=ObligationStatus.COMPUTED,
-        verification_method=VerificationMethod.DETERMINISTIC_COMPUTATION,
-        verification_reason="calculated in code, not model output",
-        computation_formula=computation.formula,
-        computation_inputs=inputs,
-    )
-    return [deadline], []
+    return derived, failures
 
 
 # --------------------------------------------------------------------------
@@ -452,10 +546,9 @@ def run_extraction(
             _build_candidate(settings, document_id, index, pages, proposal, obligation_type)
         )
 
-    if ObligationType.NOTICE_DEADLINE in requested:
-        derived, derived_failures = compute_derived_obligations(document_id, obligations)
-        obligations.extend(derived)
-        failures.extend(derived_failures)
+    derived, derived_failures = compute_derived_obligations(document_id, obligations, requested)
+    obligations.extend(derived)
+    failures.extend(derived_failures)
 
     can_approve = bool(obligations) and all(
         obligation.status in APPROVABLE_STATUSES for obligation in obligations
