@@ -272,6 +272,14 @@ lexically distinctive ("sixty (60) days' written notice"), so **the service
 works in BM25-only mode** when no embedding model is present; the dense side is
 there for paraphrases ("cancel the agreement" ↔ "terminate this Agreement").
 
+**Form contracts.** Filled templates express values as ticked options, which
+breaks a naive "the quote is in the document" check: `☐ Rent will NOT be
+increased` is a genuine quote of a value that was *not* agreed. Verification
+resolves the nearest checkbox governing the quoted span and **fails** an
+unticked one. Running headers repeated across pages are stripped at parse time,
+and a notice to *exercise* a renewal option is tracked separately from a notice
+to terminate — they are the same arithmetic with opposite consequences.
+
 **Verification.** The claimed quote and the claimed page are normalized
 (Unicode punctuation, ligatures, NBSP, soft hyphens, whitespace runs), then:
 normalized exact substring match first; a *bounded* fuzzy fallback second, for
@@ -299,10 +307,17 @@ needs no model server, no network and no weights. They include the spec's
 **ablation test** (§10.1): with a hallucinating model, verification catches the
 invented date and `can_approve` goes to `false`.
 
-The fixture is a synthetic six-page contract
-([data/samples/sample_contract.txt](data/samples/sample_contract.txt)) — no real
-contracts are committed, and `.gitignore` excludes PDFs, databases, indexes,
-weights and `.env`.
+Two synthetic fixtures, deliberately different in shape: a six-page prose
+services agreement ([sample_contract.txt](data/samples/sample_contract.txt)) and
+a nineteen-page filled lease form
+([sample_lease_form.txt](data/samples/sample_lease_form.txt)) with checkboxes,
+running headers and a renewal option. No real contracts are committed, and
+`.gitignore` excludes PDFs, databases, indexes, weights and `.env`.
+
+Measured on the lease form, BM25-only retrieval puts **all seven** material
+clauses in front of the model. Natural-language questions ("can I sublet the
+office?") are where lexical search breaks down — that is what the optional
+embedding backend is for, not extraction.
 
 ## Docker
 

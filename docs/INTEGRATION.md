@@ -128,6 +128,7 @@ when it is `false`.
 | Reason prefix | What happened | Suggested UI |
 |---|---|---|
 | `quote_not_found_on_page` | The quote is not in the document as claimed (hallucination) | red, require manual entry |
+| `unchecked_option` | The quote is real but comes from a form option that was **not** ticked (`☐`) — the value does not apply | red, show the quote so the reviewer sees the empty box |
 | `wrong_page: … found on page N` | The quote is real but on another page | offer a one-click page fix |
 | `page_out_of_range` | The model cited a page that does not exist | red |
 | `quote_too_short` | Under the minimum quotable length | red |
@@ -139,8 +140,20 @@ Canonical names, all `snake_case`:
 
 `contract_start_date` · `contract_end_date` · `automatic_renewal` ·
 `renewal_duration` · `termination_notice_period` · `notice_deadline` ·
+`renewal_option_notice` · `renewal_option_deadline` ·
 `payment_obligation` · `fee_escalation` · `indemnification` ·
 `liability_cap` · `governing_law`
+
+**Two notice families, opposite consequences** — surface them differently:
+
+| | Notice | Deadline | Miss it and… |
+|---|---|---|---|
+| Evergreen contract | `termination_notice_period` | `notice_deadline` | it renews and you pay for another term |
+| Renewal option | `renewal_option_notice` | `renewal_option_deadline` | the option lapses and you **lose** the contract |
+
+A contract normally has one family or the other. `renewal_option_deadline`
+carries `computation_inputs.consequence` = *"the renewal option lapses after
+this date"* so the row can be labelled without inspecting the type.
 
 Aliases accepted on input (`term_end` → `contract_end_date`,
 `termination_notice` → `termination_notice_period`, `term_start`, `notice`,

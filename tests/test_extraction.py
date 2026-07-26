@@ -251,7 +251,25 @@ def test_requested_subset_is_respected(settings, bm25_index, contract_pages):
 
 
 def test_default_type_list_covers_the_spec():
-    assert len(DEFAULT_OBLIGATION_TYPES) == 11
+    """The eleven types from the spec, plus the renewal-option pair the lease
+    fixture forced us to add (a notice to *keep* a contract, not to leave it)."""
+    spec = {
+        "contract_start_date",
+        "contract_end_date",
+        "automatic_renewal",
+        "renewal_duration",
+        "termination_notice_period",
+        "notice_deadline",
+        "payment_obligation",
+        "fee_escalation",
+        "indemnification",
+        "liability_cap",
+        "governing_law",
+    }
+    values = {obligation_type.value for obligation_type in DEFAULT_OBLIGATION_TYPES}
+
+    assert spec <= values
+    assert values - spec == {"renewal_option_notice", "renewal_option_deadline"}
 
 
 # --------------------------------------------------------------------------
