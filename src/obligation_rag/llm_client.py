@@ -25,7 +25,7 @@ import re
 from abc import ABC, abstractmethod
 
 from .config import Settings
-from .date_math import find_dates, parse_duration
+from .date_math import duration_for_anchor, find_dates, find_durations
 from .schemas import LLMExtractionRequest, LLMExtractionResponse, LLMObligation, ObligationType
 
 logger = logging.getLogger(__name__)
@@ -196,6 +196,22 @@ _GOVERNING_LAW = re.compile(
 )
 
 
+def _anchor(lowered: str, word: str, *, skip_after: tuple[str, ...] = ()) -> int | None:
+    """First occurrence of ``word``, skipping ones with an unwanted prefix.
+
+    "non-renewal" contains "renew" but belongs to the notice side of a clause,
+    not to the term length — anchoring on it attributes the notice period to
+    the renewal duration.
+    """
+    start = 0
+    while (position := lowered.find(word, start)) != -1:
+        preceding = lowered[max(0, position - 4) : position]
+        if not any(preceding.endswith(prefix) for prefix in skip_after):
+            return position
+        start = position + 1
+    return None
+
+
 def _sentences(text: str) -> list[str]:
     """Paragraph boundaries first (headings rarely end in a period), then sentences."""
     sentences: list[str] = []
@@ -243,7 +259,15 @@ class FakeLLMClient(LLMClient):
         # ending at midnight on …"), so the first date opens it and the last
         # date closes it.
         dates = find_dates(sentence)
-        duration = parse_duration(sentence)
+        # A single clause routinely states a term length AND a notice period.
+        # Each obligation takes the duration nearest its own keyword rather
+        # than whichever happens to come first.
+        durations = find_durations(sentence)
+        duration = durations[0][1] if durations else None
+        notice_duration = duration_for_anchor(durations, _anchor(lowered, "notice"))
+        renewal_duration = duration_for_anchor(
+            durations, _anchor(lowered, "renew", skip_after=("non-", "non "))
+        )
 
         if dates and any(
             keyword in lowered
@@ -283,8 +307,8 @@ class FakeLLMClient(LLMClient):
             and any(keyword in lowered for keyword in ("automatic", "automatically", "auto-renew"))
         ):
             matches.append((ObligationType.AUTOMATIC_RENEWAL, "true"))
-            if duration:
-                matches.append((ObligationType.RENEWAL_DURATION, duration.to_iso()))
+            if renewal_duration:
+                matches.append((ObligationType.RENEWAL_DURATION, renewal_duration.to_iso()))
 
         # "…90 days prior to the Termination Date" in a renewal-option clause is
         # a deadline to KEEP the contract, not to leave it. The mention of the
@@ -303,9 +327,9 @@ class FakeLLMClient(LLMClient):
         )
         renewal_option = bool(duration) and renewal_context and notice_shaped
         if renewal_option:
-            matches.append((ObligationType.RENEWAL_OPTION_NOTICE, duration.to_iso()))
-        elif duration and renewal_context and "term" in lowered:
-            matches.append((ObligationType.RENEWAL_DURATION, duration.to_iso()))
+            matches.append((ObligationType.RENEWAL_OPTION_NOTICE, notice_duration.to_iso()))
+        elif renewal_duration and renewal_context and "term" in lowered:
+            matches.append((ObligationType.RENEWAL_DURATION, renewal_duration.to_iso()))
 
         # A duration next to "terminate" is not automatically a notice period:
         # "fail to cure within 15 days" is a cure period, "within 30 days after
@@ -335,7 +359,7 @@ class FakeLLMClient(LLMClient):
                 for keyword in ("terminat", "cancel", "non-renew", "not to renew")
             )
         ):
-            matches.append((ObligationType.TERMINATION_NOTICE_PERIOD, duration.to_iso()))
+            matches.append((ObligationType.TERMINATION_NOTICE_PERIOD, notice_duration.to_iso()))
 
         money = _MONEY.search(sentence)
         if money and any(keyword in lowered for keyword in ("pay", "fee", "invoice", "amount due")):

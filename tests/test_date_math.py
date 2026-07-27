@@ -12,6 +12,8 @@ from obligation_rag.date_math import (
     compute_notice_deadline,
     compute_renewal_date,
     days_until,
+    duration_for_anchor,
+    find_durations,
     parse_date,
     parse_duration,
     shift_date,
@@ -142,3 +144,41 @@ def test_renewal_date_adds():
 def test_days_until_is_signed():
     assert days_until(date(2026, 3, 31), reference=date(2026, 1, 30)) == 60
     assert days_until(date(2026, 1, 1), reference=date(2026, 1, 30)) == -29
+
+
+def test_find_durations_returns_all_of_them_in_order():
+    """Renewal clauses state the term length and the notice period together."""
+    clause = (
+        "This Agreement shall renew automatically for successive terms of sixty (60) "
+        "months unless either party gives written notice of non-renewal at least two "
+        "hundred and seventy (270) days before the end of the then-current term."
+    )
+
+    found = find_durations(clause)
+
+    assert [duration for _, duration in found] == [Duration(months=60), Duration(days=270)]
+    assert found[0][0] < found[1][0]
+
+
+def test_duration_for_anchor_prefers_what_follows_the_keyword():
+    """Pure proximity. Choosing a sensible anchor is the caller's job."""
+    clause = (
+        "This Agreement shall renew automatically for successive terms of sixty (60) "
+        "months unless either party gives written notice of non-renewal at least two "
+        "hundred and seventy (270) days"
+    )
+    found = find_durations(clause)
+
+    assert duration_for_anchor(found, clause.lower().index("renew")) == Duration(months=60)
+    assert duration_for_anchor(found, clause.lower().index("notice")) == Duration(days=270)
+    assert duration_for_anchor(found, None) == Duration(months=60)
+    assert duration_for_anchor([], 0) is None
+
+
+def test_a_270_day_notice_gives_a_very_different_deadline_than_60_months():
+    """The whole point: the wrong duration produces a plausible wrong date."""
+    right = compute_notice_deadline("2031-06-30", "P270D")
+    wrong = compute_notice_deadline("2031-06-30", "P60M")
+
+    assert right.result_iso == "2030-10-03"
+    assert wrong.result_iso == "2026-06-30"

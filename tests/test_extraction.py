@@ -324,3 +324,113 @@ def test_json_repair_handles_fenced_and_chatty_model_output():
         _extract_json_object("I could not find anything.")
     with pytest.raises(LLMClientError, match="truncated"):
         _extract_json_object('{"obligations": [')
+
+
+# --------------------------------------------------------------------------
+# Regressions found by running the real sample dataset
+# --------------------------------------------------------------------------
+
+
+def test_a_clause_stating_two_durations_assigns_each_to_its_own_field():
+    """From 07-ridgeline-supply-long.pdf: 60-month term, 270-day notice, one
+    sentence. Taking the first duration for both made the notice 60 months and
+    the computed deadline wrong by four years — while looking entirely plausible."""
+    from obligation_rag.llm_client import FakeLLMClient
+    from obligation_rag.schemas import LLMContextChunk, LLMExtractionRequest
+
+    clause = (
+        "RENEWAL This Agreement shall renew automatically for successive terms of "
+        "sixty (60) months unless either party gives written notice of non-renewal "
+        "at least two hundred and seventy (270) days before the end of the "
+        "then-current term."
+    )
+    response = FakeLLMClient().propose_obligations(
+        LLMExtractionRequest(
+            document_id="doc",
+            obligation_types=[
+                ObligationType.RENEWAL_DURATION,
+                ObligationType.TERMINATION_NOTICE_PERIOD,
+            ],
+            context=[LLMContextChunk(chunk_id="chunk_0", page=13, text=clause)],
+        )
+    )
+
+    by_type = {item.obligation_type: item.raw_value for item in response.obligations}
+    assert by_type["renewal_duration"] == "P60M"
+    assert by_type["termination_notice_period"] == "P270D"
+
+
+def test_non_renewal_does_not_anchor_the_renewal_term():
+    """ "non-renewal" carries "renew" but belongs to the notice side."""
+    from obligation_rag.llm_client import _anchor
+
+    lowered = "gives written notice of non-renewal at least two hundred and seventy (270) days"
+
+    assert _anchor(lowered, "renew", skip_after=("non-", "non ")) is None
+    assert _anchor(lowered, "notice") == lowered.index("notice")
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # 06-tri-party: a cap with no figure is still a cap.
+        (
+            "Escrow Agent's liability shall not exceed the fees it has received",
+            "Escrow Agent's liability shall not exceed the fees it has received",
+        ),
+        (
+            "liability is limited to the amounts paid in the preceding 12 months",
+            "liability is limited to the amounts paid in the preceding 12 months",
+        ),
+    ],
+)
+def test_a_cap_without_a_figure_is_kept_not_failed(raw, expected):
+    assert normalize_value(ObligationType.LIABILITY_CAP, raw, "") == expected
+
+
+def test_a_figure_still_wins_over_the_clause_text():
+    assert (
+        normalize_value(ObligationType.LIABILITY_CAP, "shall not exceed $250,000", "")
+        == "USD 250000.00"
+    )
+
+
+def test_a_cap_expressed_as_a_multiple_of_fees_is_not_read_as_an_amount():
+    """From 01-harborview-msa-clean.pdf. The old money regex matched the "12"
+    of "twelve (12) months" and the "m" of "months" as the million multiplier,
+    recording a USD 12,000,000 cap on a contract billing USD 180,000 a year —
+    verified, approvable, and invented."""
+    clause = (
+        "Neither party's aggregate liability under this Agreement shall exceed the "
+        "total fees paid in the twelve (12) months preceding the claim."
+    )
+
+    value = normalize_value(ObligationType.LIABILITY_CAP, clause, "")
+
+    assert value is not None
+    assert "12000000" not in value
+    assert "exceed the" in value
+
+
+@pytest.mark.parametrize(
+    "text", ["payable within thirty (30) days", "cure the breach within 15 days"]
+)
+def test_a_bare_number_is_never_money(text):
+    from obligation_rag.extraction import _normalize_money
+
+    assert _normalize_money(text) is None
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("USD 180,000 per annum", "USD 180000.00"),
+        ("$120,000.00", "USD 120000.00"),
+        ("EUR 1.5 million", "EUR 1500000.00"),
+        ("2,400,000 dollars", "USD 2400000.00"),
+    ],
+)
+def test_money_still_parses_when_a_currency_says_so(text, expected):
+    from obligation_rag.extraction import _normalize_money
+
+    assert _normalize_money(text) == expected

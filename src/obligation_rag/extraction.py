@@ -112,20 +112,41 @@ MONEY_TYPES: frozenset[ObligationType] = frozenset(
     {ObligationType.PAYMENT_OBLIGATION, ObligationType.LIABILITY_CAP}
 )
 
-_MONEY = re.compile(
-    r"(?P<symbol>USD|EUR|GBP|CHF|CAD|AUD|\$|€|£)?\s?(?P<amount>\d[\d,]*(?:\.\d+)?)"
-    r"\s*(?P<scale>million|billion|thousand|k|m)?",
+#: A figure only counts as money when a currency says so. Without that guard
+#: "within 30 days" reads as USD 30.00, and "the preceding 12 months" reads as
+#: USD 12,000,000 — the "m" of "months" standing in for "million". Both silently
+#: put a number in the register that nobody wrote in the contract.
+_CURRENCY = r"USD|EUR|GBP|CHF|CAD|AUD|\$|€|£"
+_AMOUNT = r"\d[\d,]*(?:\.\d+)?"
+_SCALE_WORD = r"million|billion|thousand"
+_MONEY_PREFIXED = re.compile(
+    rf"(?P<symbol>{_CURRENCY})\s?(?P<amount>{_AMOUNT})(?:\s*(?P<scale>{_SCALE_WORD}))?\b",
     re.IGNORECASE,
 )
-_SYMBOL_TO_CODE = {"$": "USD", "€": "EUR", "£": "GBP"}
-_SCALE = {
-    "thousand": 1_000,
-    "k": 1_000,
-    "million": 1_000_000,
-    "m": 1_000_000,
-    "billion": 1_000_000_000,
+_MONEY_SUFFIXED = re.compile(
+    rf"(?P<amount>{_AMOUNT})(?:\s*(?P<scale>{_SCALE_WORD}))?\s*"
+    rf"(?P<symbol>dollars|euros|pounds|USD|EUR|GBP)\b",
+    re.IGNORECASE,
+)
+_SYMBOL_TO_CODE = {
+    "$": "USD",
+    "€": "EUR",
+    "£": "GBP",
+    "DOLLARS": "USD",
+    "EUROS": "EUR",
+    "POUNDS": "GBP",
 }
+_SCALE = {"thousand": 1_000, "million": 1_000_000, "billion": 1_000_000_000}
 _PERCENT = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*(?:%|percent)", re.IGNORECASE)
+#: Cap or payment language with no figure attached — a formula, not an amount.
+#: Negation lives anywhere in the clause ("Neither party's liability shall
+#: exceed …"), so match the verb rather than a fixed phrase.
+_QUALITATIVE_AMOUNT = re.compile(
+    r"\bexceed\b|\blimited to\b|\bcapped at\b|\bno greater than\b|\bshall pay\b|\bpayable\b",
+    re.IGNORECASE,
+)
+#: What a normalized monetary value looks like ("USD 120000.00").
+_NUMERIC_AMOUNT = re.compile(r"^[A-Z]{3} \d")
 #: A renewal that a party must *choose* is not an automatic renewal. Filled
 #: lease forms say "This Lease may be renewed" and mean the opposite of a
 #: hands-off evergreen clause, so these phrasings normalise to false.
@@ -175,14 +196,14 @@ def retrieve_context(
 
 
 def _normalize_money(text: str) -> str | None:
-    match = _MONEY.search(text)
+    match = _MONEY_PREFIXED.search(text) or _MONEY_SUFFIXED.search(text)
     if not match:
         return None
     amount = float(match.group("amount").replace(",", ""))
     scale = match.group("scale")
     if scale:
         amount *= _SCALE[scale.lower()]
-    symbol = (match.group("symbol") or "USD").upper()
+    symbol = match.group("symbol").upper()
     currency = _SYMBOL_TO_CODE.get(symbol, symbol)
     return f"{currency} {amount:,.2f}".replace(",", "")
 
@@ -224,6 +245,13 @@ def normalize_value(obligation_type: ObligationType, raw_value: str, quote: str)
             normalized = _normalize_money(candidate)
             if normalized:
                 return normalized
+        # A cap can be real and still have no number: "shall not exceed the
+        # fees it has received". Failing it would block approval on a contract
+        # whose liability clause is perfectly clear to a reader — so it is kept
+        # as a verified qualitative term and flagged as non-numeric instead.
+        for candidate in candidates:
+            if candidate and _QUALITATIVE_AMOUNT.search(candidate):
+                return re.sub(r"\s+", " ", candidate).strip(" .,;")
         return None
 
     if obligation_type is ObligationType.FEE_ESCALATION:
@@ -317,6 +345,15 @@ def _build_candidate(
             f"could not be parsed as {obligation_type.value}"
         )
         return candidate
+
+    if obligation_type in MONEY_TYPES and not _NUMERIC_AMOUNT.match(normalized):
+        # Verified and usable, but not comparable, not summable, and not
+        # something a deadline can be computed from. Say so rather than let it
+        # sit in the register looking like an amount.
+        candidate.verification_reason = (
+            "non_numeric_amount: the clause states a cap or obligation without a "
+            "figure; the value is the clause text and needs human reading"
+        )
 
     candidate.status = ObligationStatus.VERIFIED
     return candidate

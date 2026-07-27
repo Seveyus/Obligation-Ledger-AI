@@ -241,6 +241,49 @@ def _unit_to_duration(amount: int, unit: str) -> Duration:
     return Duration(years=amount)
 
 
+def find_durations(text: str) -> list[tuple[int, Duration]]:
+    """Every duration with its offset, left to right, no overlaps.
+
+    Renewal clauses habitually state two: the length of the term and the notice
+    needed to stop it — "successive terms of sixty (60) months unless either
+    party gives written notice ... at least two hundred and seventy (270)
+    days". Taking the first for both turns a 270-day notice into a 60-month
+    one, and the deadline computed from it is wrong while looking plausible.
+    """
+    spans: list[tuple[int, int, Duration]] = []
+    for pattern in (_PARENTHESISED_DURATION, _NUMERIC_DURATION, _WORD_DURATION):
+        for match in pattern.finditer(text):
+            parsed = parse_duration(match.group(0))
+            if parsed is None:
+                continue
+            if any(match.start() < end and start < match.end() for start, end, _ in spans):
+                continue  # already covered by a higher-priority pattern
+            spans.append((match.start(), match.end(), parsed))
+    return [(start, parsed) for start, _, parsed in sorted(spans)]
+
+
+def duration_for_anchor(
+    durations: list[tuple[int, Duration]], anchor: int | None
+) -> Duration | None:
+    """The duration governed by the keyword at ``anchor``.
+
+    Direction matters more than distance. Clauses state the period *after* the
+    word that introduces it — "written notice of non-renewal at least two
+    hundred and seventy (270) days" — and a keyword sitting between two
+    durations is often marginally closer to the wrong one. So: the first
+    duration at or after the anchor, falling back to the closest when the
+    keyword trails all of them.
+    """
+    if not durations:
+        return None
+    if anchor is None:
+        return durations[0][1]
+    for position, duration in durations:
+        if position >= anchor:
+            return duration
+    return min(durations, key=lambda item: abs(item[0] - anchor))[1]
+
+
 def parse_duration(text: str) -> Duration | None:
     """Parse a notice/renewal period from contract wording or ISO-8601.
 
